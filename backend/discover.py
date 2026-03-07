@@ -68,12 +68,21 @@ def _gh_get(url: str, params: Optional[dict] = None) -> Optional[dict]:
                 time.sleep(wait)
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        if e.code == 403:
+        if e.code in (403, 429):
             reset = int(e.headers.get("X-RateLimit-Reset", 0))
             wait = max(reset - int(time.time()), 60)
-            print(f"  Rate limited — sleeping {wait}s", file=sys.stderr)
+            print(f"  Rate limited ({e.code}) — sleeping {wait}s", file=sys.stderr)
             time.sleep(wait)
             return _gh_get(url)  # retry once
+        if e.code == 401:
+            # Could be rate limit exhaustion or bad token
+            remaining = e.headers.get("X-RateLimit-Remaining", "?")
+            if remaining != "?" and int(remaining) == 0:
+                reset = int(e.headers.get("X-RateLimit-Reset", 0))
+                wait = max(reset - int(time.time()), 60)
+                print(f"  Rate limit exhausted — sleeping {wait}s", file=sys.stderr)
+                time.sleep(wait)
+                return _gh_get(url)  # retry once
         print(f"  GitHub API error {e.code}: {url}", file=sys.stderr)
         return None
     except Exception as e:
@@ -169,21 +178,26 @@ def fetch_repo_metadata(repo_fullname: str, full: bool = False) -> dict:
 # Skill structure analysis
 # ---------------------------------------------------------------------------
 
-def analyze_skill_structure(repo_fullname: str, skill_path: str) -> dict:
-    """Check what dirs exist next to the SKILL.md using Tree API (1 call)."""
+def analyze_skill_structure(repo_fullname: str, skill_path: str, tree_data: dict | None = None) -> dict:
+    """Check what dirs exist next to the SKILL.md.
+
+    Args:
+        tree_data: Pre-fetched tree data to avoid extra API call.
+    """
     parent = skill_path.rsplit("/", 1)[0] if "/" in skill_path else ""
     prefix = f"{parent}/" if parent else ""
 
-    data = _gh_get(
-        f"{GITHUB_API}/repos/{repo_fullname}/git/trees/HEAD",
-        params={"recursive": "1"},
-    )
-    if not data or "tree" not in data:
+    if tree_data is None:
+        tree_data = _gh_get(
+            f"{GITHUB_API}/repos/{repo_fullname}/git/trees/HEAD",
+            params={"recursive": "1"},
+        )
+    if not tree_data or "tree" not in tree_data:
         return {}
 
     # Collect sibling directory names
     sibling_dirs = set()
-    for item in data["tree"]:
+    for item in tree_data["tree"]:
         path = item.get("path", "")
         if item.get("type") == "tree" and path.startswith(prefix):
             relative = path[len(prefix):]
@@ -196,6 +210,10 @@ def analyze_skill_structure(repo_fullname: str, skill_path: str) -> dict:
         "has_examples": "examples" in sibling_dirs or "example" in sibling_dirs,
         "has_templates": "templates" in sibling_dirs or "template" in sibling_dirs,
     }
+
+
+# Cache for tree data fetched during discovery (reused in persist)
+_tree_cache: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -294,17 +312,22 @@ def discover_from_search(run: DiscoveryRun) -> list[dict]:
             added_s1 += 1
     print(f"    -> {len(results)} raw, {added_s1} valid SKILL.md files", file=sys.stderr)
 
-    # --- Strategy 1b: Standalone SKILL.md at repo root ---
-    # Some skills are published as standalone repos with SKILL.md at root
-    print("  Strategy 1b: Standalone SKILL.md repos", file=sys.stderr)
-    results = _search_code_paginated("filename:SKILL.md path:/")
-    added_s1b = 0
-    for r in results:
-        basename = r["path"].rsplit("/", 1)[-1] if "/" in r["path"] else r["path"]
-        if basename == "SKILL.md":
-            _add(r["repo_fullname"], r["path"])
-            added_s1b += 1
-    print(f"    -> {len(results)} raw, {added_s1b} valid", file=sys.stderr)
+    # --- Strategy 1b: SKILL.md with Claude-related frontmatter ---
+    # Catches standalone SKILL.md files outside .claude/skills/ that are
+    # actually Claude Code skills (contain "name:" and "description:").
+    print("  Strategy 1b: Standalone Claude skills", file=sys.stderr)
+    for sq in [
+        'filename:SKILL.md "name:" "description:" path:/',
+        'filename:SKILL.md "name:" "instructions"',
+    ]:
+        results = _search_code_paginated(sq, max_pages=3)
+        added = 0
+        for r in results:
+            basename = r["path"].rsplit("/", 1)[-1] if "/" in r["path"] else r["path"]
+            if basename == "SKILL.md" and ".claude/" not in r["path"]:
+                _add(r["repo_fullname"], r["path"])
+                added += 1
+        print(f"    {sq[:60]}: {added} new", file=sys.stderr)
 
     # --- Strategy 2: Topic search ---
     # Find repos tagged with relevant topics (different API, different rate limit)
@@ -336,33 +359,28 @@ def discover_from_search(run: DiscoveryRun) -> list[dict]:
                 break
             time.sleep(2)
 
-    # --- Strategy 3: Repo description search ---
-    print("  Strategy 3: Repo description search", file=sys.stderr)
+    # --- Strategy 3: Targeted repo name search ---
+    # Find repos explicitly named as Claude skill collections.
+    print("  Strategy 3: Targeted repo search", file=sys.stderr)
     desc_queries = [
-        "claude skill in:description",
-        "claude code skill in:description",
-        "agent skill claude in:description,readme",
-        "SKILL.md claude in:readme",
-        "claude-code skill in:name,description",
+        '"claude" "skill" in:name',
+        '"claude-code" in:name fork:false',
     ]
     for dq in desc_queries:
         print(f"    Query: {dq}", file=sys.stderr)
-        for page in range(1, 4):
-            data = _gh_get(
-                f"{GITHUB_API}/search/repositories",
-                params={"q": dq, "per_page": "100", "page": str(page)},
-            )
-            if not data or "items" not in data:
-                break
-            for repo in data["items"]:
-                fullname = repo.get("full_name", "")
-                if fullname:
-                    paths = _find_skill_mds_via_tree(fullname)
-                    for p in paths:
-                        _add(fullname, p)
-            if len(data["items"]) < 100:
-                break
-            time.sleep(2)
+        data = _gh_get(
+            f"{GITHUB_API}/search/repositories",
+            params={"q": dq, "per_page": "100", "page": "1"},
+        )
+        if not data or "items" not in data:
+            continue
+        for repo in data["items"]:
+            fullname = repo.get("full_name", "")
+            if fullname:
+                paths = _find_skill_mds_via_tree(fullname)
+                for p in paths:
+                    _add(fullname, p)
+        time.sleep(2)
 
     print(f"  Total discovered: {len(found)} unique skills", file=sys.stderr)
     return found
@@ -374,10 +392,15 @@ def discover_from_search(run: DiscoveryRun) -> list[dict]:
 
 def _find_skill_mds_via_tree(repo_fullname: str) -> list[str]:
     """Use Git Tree API to find all SKILL.md files in a repo (1 API call)."""
-    data = _gh_get(
-        f"{GITHUB_API}/repos/{repo_fullname}/git/trees/HEAD",
-        params={"recursive": "1"},
-    )
+    if repo_fullname in _tree_cache:
+        data = _tree_cache[repo_fullname]
+    else:
+        data = _gh_get(
+            f"{GITHUB_API}/repos/{repo_fullname}/git/trees/HEAD",
+            params={"recursive": "1"},
+        )
+        if data and "tree" in data:
+            _tree_cache[repo_fullname] = data
     if not data or "tree" not in data:
         return []
     return [
@@ -446,50 +469,70 @@ def persist_discoveries(
     discoveries: list[dict],
     run: DiscoveryRun,
     full_metadata: bool = False,
+    limit: int = 0,
 ) -> tuple[int, int]:
     """Save discovered skills to DB.  Returns (total, new).
 
     Args:
         full_metadata: If True, fetch CI/tests/contributors/releases per repo
                        (5 extra API calls each). Default False for speed.
+        limit: Max skills to persist (0=unlimited).
     """
     session = get_session()
     total = len(discoveries)
     new_count = 0
+    skipped = 0
 
     # Cache repo metadata to avoid duplicate fetches
     # (many skills come from the same repo)
     _meta_cache: dict[str, dict] = {}
     _structure_cache: dict[str, dict] = {}
+    _readme_cache: dict[str, str] = {}
 
-    for disc in discoveries:
+    print(f"  Persisting {total} discoveries...", file=sys.stderr)
+
+    for i, disc in enumerate(discoveries):
         slug = disc["slug"]
         existing = session.exec(
             select(Skill).where(Skill.slug == slug)
         ).first()
 
         if existing:
+            skipped += 1
             continue
+
+        if limit and new_count >= limit:
+            print(f"  Reached persist limit ({limit}), stopping.", file=sys.stderr)
+            break
 
         repo = disc["repo_fullname"]
 
         # Fetch SKILL.md content
         skill_md = _gh_get_file(repo, disc["skill_path"])
-        readme = _gh_get_file(repo, "README.md") if repo not in _meta_cache else None
+
+        # Validate this is actually a Claude Code skill
+        if not _is_claude_skill(skill_md or "", disc["skill_path"]):
+            continue
+
+        # Cache README per repo (1 call per repo, not per skill)
+        if repo not in _readme_cache:
+            _readme_cache[repo] = _gh_get_file(repo, "README.md") or ""
+        readme = _readme_cache[repo]
 
         # Extract name from SKILL.md frontmatter or directory name
         name = _extract_skill_name(skill_md, disc["skill_path"], repo)
 
         # Fetch repo metadata (cached per repo)
         if repo not in _meta_cache:
-            print(f"  Fetching metadata: {repo}", file=sys.stderr)
+            print(f"  Fetching metadata: {repo} ({new_count+1}/{total})", file=sys.stderr)
             _meta_cache[repo] = fetch_repo_metadata(repo, full=full_metadata)
         meta = _meta_cache[repo]
 
-        # Analyze structure (cached per repo)
+        # Analyze structure — reuse cached tree data from discovery phase
         cache_key = f"{repo}:{disc['skill_path']}"
         if cache_key not in _structure_cache:
-            structure = analyze_skill_structure(repo, disc["skill_path"])
+            tree_data = _tree_cache.get(repo)
+            structure = analyze_skill_structure(repo, disc["skill_path"], tree_data=tree_data)
             _structure_cache[cache_key] = structure
         else:
             structure = _structure_cache[cache_key]
@@ -529,8 +572,13 @@ def persist_discoveries(
 
         session.add(skill)
         new_count += 1
-        time.sleep(0.3)  # rate limit courtesy
 
+        # Progress update every 25 skills
+        if new_count % 25 == 0:
+            print(f"  Progress: {new_count} new skills persisted ({i+1}/{total} processed)", file=sys.stderr)
+            session.commit()  # commit in batches
+
+    print(f"  Done: {new_count} new, {skipped} existing, {total - new_count - skipped} failed", file=sys.stderr)
     run.skills_found = total
     run.skills_new = new_count
     run.finished_at = datetime.now(timezone.utc).isoformat()
@@ -539,6 +587,29 @@ def persist_discoveries(
     session.close()
 
     return total, new_count
+
+
+def _is_claude_skill(skill_md: str, skill_path: str) -> bool:
+    """Check if a SKILL.md is likely a Claude Code skill (not a random file)."""
+    if not skill_md:
+        return False
+
+    # Standard Claude Code skill location
+    if ".claude/skills/" in skill_path:
+        return True
+
+    content_lower = skill_md.lower()
+
+    # Check for skill frontmatter fields (name: + description:)
+    has_name = "name:" in content_lower[:500]
+    has_desc = "description:" in content_lower[:500]
+    if has_name and has_desc:
+        return True
+
+    # Check for Claude/agent related content
+    claude_markers = ["claude", "agent", "instructions", "skill"]
+    matches = sum(1 for m in claude_markers if m in content_lower)
+    return matches >= 2
 
 
 def _extract_skill_name(

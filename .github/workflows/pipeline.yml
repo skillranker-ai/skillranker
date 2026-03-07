@@ -42,6 +42,7 @@ jobs:
         run: |
           python -m backend.pipeline \
             --discover-source all \
+            --discover-limit 500 \
             --enrich-limit 50 \
             --output site/public/skills.json
 

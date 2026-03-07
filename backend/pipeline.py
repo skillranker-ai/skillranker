@@ -14,6 +14,7 @@ import argparse
 import sys
 
 from backend.db import init_db
+import backend.models  # noqa: F401 — ensure tables are registered before init_db
 
 
 def main():
@@ -23,6 +24,8 @@ def main():
     parser.add_argument("--skip-enrich", action="store_true")
     parser.add_argument("--skip-export", action="store_true")
     parser.add_argument("--enrich-limit", type=int, default=0)
+    parser.add_argument("--discover-limit", type=int, default=0,
+                        help="Max skills to persist per run (0=unlimited)")
     parser.add_argument("--discover-source", choices=["all", "search", "awesome"], default="all")
     parser.add_argument("--full-metadata", action="store_true",
                         help="Fetch CI/tests/contributors/releases (5 extra API calls per repo)")
@@ -48,7 +51,11 @@ def main():
         if args.discover_source in ("all", "awesome"):
             discoveries.extend(discover_from_awesome(run))
 
-        total, new = persist_discoveries(discoveries, run, full_metadata=args.full_metadata)
+        total, new = persist_discoveries(
+            discoveries, run,
+            full_metadata=args.full_metadata,
+            limit=args.discover_limit,
+        )
         print(f"  Result: {total} found, {new} new\n", file=sys.stderr)
 
     # 2. Evaluation
