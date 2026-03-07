@@ -31,7 +31,6 @@ from sqlmodel import select
 from backend.config import (
     GITHUB_API,
     GITHUB_AWESOME_LISTS,
-    GITHUB_SEARCH_QUERIES,
     GITHUB_TOKEN,
 )
 from backend.db import get_session, init_db
@@ -103,46 +102,18 @@ def _make_slug(repo_fullname: str, skill_path: str) -> str:
 # Repo metadata fetcher
 # ---------------------------------------------------------------------------
 
-def fetch_repo_metadata(repo_fullname: str) -> dict:
-    """Fetch repository metadata from GitHub API."""
+def fetch_repo_metadata(repo_fullname: str, full: bool = False) -> dict:
+    """Fetch repository metadata from GitHub API.
+
+    Args:
+        full: If True, also fetch CI, tests, contributors, releases
+              (5 extra API calls). If False, only the repo endpoint (1 call).
+    """
     data = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}")
     if not data:
         return {}
 
-    # Check for CI
-    has_ci = False
-    workflows = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/actions/workflows")
-    if workflows and workflows.get("total_count", 0) > 0:
-        has_ci = True
-
-    # Check for tests (heuristic: look for test directories)
-    has_tests = False
-    tree = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/git/trees/HEAD")
-    if tree and "tree" in tree:
-        for item in tree["tree"]:
-            name = item.get("path", "").lower()
-            if name in ("tests", "test", "__tests__", "spec", "specs"):
-                has_tests = True
-                break
-
-    # Contributors count
-    contributors = 0
-    contribs = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/contributors",
-                       params={"per_page": "1", "anon": "true"})
-    if isinstance(contribs, list):
-        contributors = len(contribs)
-        # GitHub returns Link header for pagination — approximate from first page
-        # For accuracy we'd parse Link header, but 1 is minimum
-
-    # Releases
-    releases = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/releases",
-                       params={"per_page": "5"})
-    release_count = len(releases) if isinstance(releases, list) else 0
-    latest_release = ""
-    if isinstance(releases, list) and releases:
-        latest_release = releases[0].get("tag_name", "")
-
-    return {
+    result = {
         "stars": data.get("stargazers_count", 0),
         "forks": data.get("forks_count", 0),
         "watchers": data.get("subscribers_count", 0),
@@ -151,12 +122,47 @@ def fetch_repo_metadata(repo_fullname: str) -> dict:
         "topics": data.get("topics", []),
         "created_at_gh": data.get("created_at", ""),
         "last_commit": data.get("pushed_at", ""),
-        "has_ci": has_ci,
-        "has_tests": has_tests,
-        "contributors": max(contributors, 1),
-        "release_count": release_count,
-        "latest_release": latest_release,
+        "has_ci": False,
+        "has_tests": False,
+        "contributors": 1,
+        "release_count": 0,
+        "latest_release": "",
     }
+
+    if not full:
+        return result
+
+    # --- Extra calls (only in full mode) ---
+
+    # Check for CI
+    workflows = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/actions/workflows")
+    if workflows and workflows.get("total_count", 0) > 0:
+        result["has_ci"] = True
+
+    # Check for tests (heuristic: look for test directories)
+    tree = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/git/trees/HEAD")
+    if tree and "tree" in tree:
+        for item in tree["tree"]:
+            name = item.get("path", "").lower()
+            if name in ("tests", "test", "__tests__", "spec", "specs"):
+                result["has_tests"] = True
+                break
+
+    # Contributors count
+    contribs = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/contributors",
+                       params={"per_page": "1", "anon": "true"})
+    if isinstance(contribs, list):
+        result["contributors"] = max(len(contribs), 1)
+
+    # Releases
+    releases = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/releases",
+                       params={"per_page": "5"})
+    if isinstance(releases, list):
+        result["release_count"] = len(releases)
+        if releases:
+            result["latest_release"] = releases[0].get("tag_name", "")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -193,49 +199,161 @@ def analyze_skill_structure(repo_fullname: str, skill_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Discovery: GitHub Code Search
+# Discovery: GitHub Code Search — FULL SCAN
 # ---------------------------------------------------------------------------
 
-def discover_from_search(run: DiscoveryRun) -> list[dict]:
-    """Search GitHub for repos containing SKILL.md files."""
-    found = []
-    seen_slugs = set()
-
-    for query in GITHUB_SEARCH_QUERIES:
-        print(f"  Searching: {query}", file=sys.stderr)
+def _search_code_paginated(query: str, max_pages: int = 10) -> list[dict]:
+    """Paginated GitHub Code Search. Returns list of {repo, path} dicts."""
+    results = []
+    for page in range(1, max_pages + 1):
         data = _gh_get(
             f"{GITHUB_API}/search/code",
-            params={"q": query, "per_page": "100"},
+            params={"q": query, "per_page": "100", "page": str(page)},
         )
         if not data or "items" not in data:
-            run.errors.append(f"Search failed: {query}")
-            continue
+            break
 
         for item in data["items"]:
             repo = item.get("repository", {})
-            repo_fullname = repo.get("full_name", "")
-            path = item.get("path", "")
-
-            if not repo_fullname or not path.endswith("SKILL.md"):
-                continue
-
-            slug = _make_slug(repo_fullname, path)
-            if slug in seen_slugs:
-                continue
-            seen_slugs.add(slug)
-
-            found.append({
-                "repo_fullname": repo_fullname,
-                "repo_url": f"https://github.com/{repo_fullname}",
-                "skill_path": path,
-                "slug": slug,
-                "source_type": SourceType.GITHUB_SEARCH.value,
+            results.append({
+                "repo_fullname": repo.get("full_name", ""),
+                "path": item.get("path", ""),
             })
 
-        # Be gentle with search API
-        time.sleep(2)
+        total = data.get("total_count", 0)
+        fetched = page * 100
+        if fetched >= total or fetched >= 1000:  # GitHub hard limit
+            break
+        time.sleep(3)  # search API rate: 10 req/min
 
-    print(f"  Search found {len(found)} skills", file=sys.stderr)
+    return results
+
+
+def _generate_date_segments() -> list[str]:
+    """Generate date range segments to bypass 1000 result limit.
+
+    GitHub Code Search returns max 1000 results per query.
+    By segmenting by repo creation date, we can get ALL results.
+    """
+    # Cover 2024-01 through current month in monthly segments,
+    # plus one catch-all for older repos
+    segments = ["created:<2024-01-01"]
+    year = 2024
+    month = 1
+    now = datetime.now(timezone.utc)
+    while True:
+        end_year = year + (month // 12)
+        end_month = (month % 12) + 1
+        start = f"{year}-{month:02d}-01"
+        end = f"{end_year}-{end_month:02d}-01"
+        segments.append(f"created:{start}..{end}")
+        month += 1
+        if year == now.year and month > now.month:
+            break
+        if month > 12:
+            month = 1
+            year += 1
+    return segments
+
+
+def discover_from_search(run: DiscoveryRun) -> list[dict]:
+    """Full GitHub scan for SKILL.md files.
+
+    Strategy:
+      1. filename:SKILL.md — finds EVERY file named SKILL.md on GitHub
+         Segmented by date to bypass 1000 result limit
+      2. Topic search — repos tagged with skill-related topics
+      3. Repo description search — repos mentioning "claude skill" etc.
+    """
+    found = []
+    seen_slugs = set()
+
+    def _add(repo_fullname: str, path: str, source: str = SourceType.GITHUB_SEARCH.value):
+        if not repo_fullname or not path.endswith("SKILL.md"):
+            return
+        slug = _make_slug(repo_fullname, path)
+        if slug in seen_slugs:
+            return
+        seen_slugs.add(slug)
+        found.append({
+            "repo_fullname": repo_fullname,
+            "repo_url": f"https://github.com/{repo_fullname}",
+            "skill_path": path,
+            "slug": slug,
+            "source_type": source,
+        })
+
+    # --- Strategy 1: filename:SKILL.md (the big gun) ---
+    # This finds EVERY SKILL.md on all of GitHub.
+    # Segmented by date to get past the 1000-result cap.
+    print("  Strategy 1: filename:SKILL.md (full GitHub scan)", file=sys.stderr)
+    segments = _generate_date_segments()
+    for seg in segments:
+        query = f"filename:SKILL.md {seg}"
+        print(f"    Segment: {seg}", file=sys.stderr)
+        results = _search_code_paginated(query)
+        for r in results:
+            _add(r["repo_fullname"], r["path"])
+        print(f"      -> {len(results)} results", file=sys.stderr)
+
+    # --- Strategy 2: Topic search ---
+    # Find repos tagged with relevant topics (different API, different rate limit)
+    print("  Strategy 2: Topic search", file=sys.stderr)
+    topic_queries = [
+        "topic:claude-code-skill",
+        "topic:claude-skills",
+        "topic:agent-skills",
+        "topic:claude-code-plugin",
+        "topic:claude-agent-skill",
+    ]
+    for tq in topic_queries:
+        print(f"    Topic: {tq}", file=sys.stderr)
+        for page in range(1, 6):
+            data = _gh_get(
+                f"{GITHUB_API}/search/repositories",
+                params={"q": tq, "per_page": "100", "page": str(page)},
+            )
+            if not data or "items" not in data:
+                break
+            for repo in data["items"]:
+                fullname = repo.get("full_name", "")
+                if fullname:
+                    # Use Tree API to find SKILL.md in this repo
+                    paths = _find_skill_mds_via_tree(fullname)
+                    for p in paths:
+                        _add(fullname, p)
+            if len(data["items"]) < 100:
+                break
+            time.sleep(2)
+
+    # --- Strategy 3: Repo description search ---
+    print("  Strategy 3: Repo description search", file=sys.stderr)
+    desc_queries = [
+        "claude skill in:description",
+        "claude code skill in:description",
+        "agent skill claude in:description,readme",
+        "SKILL.md claude in:readme",
+    ]
+    for dq in desc_queries:
+        print(f"    Query: {dq}", file=sys.stderr)
+        for page in range(1, 4):
+            data = _gh_get(
+                f"{GITHUB_API}/search/repositories",
+                params={"q": dq, "per_page": "100", "page": str(page)},
+            )
+            if not data or "items" not in data:
+                break
+            for repo in data["items"]:
+                fullname = repo.get("full_name", "")
+                if fullname:
+                    paths = _find_skill_mds_via_tree(fullname)
+                    for p in paths:
+                        _add(fullname, p)
+            if len(data["items"]) < 100:
+                break
+            time.sleep(2)
+
+    print(f"  Total discovered: {len(found)} unique skills", file=sys.stderr)
     return found
 
 
@@ -313,11 +431,25 @@ def discover_from_awesome(run: DiscoveryRun) -> list[dict]:
 # Persist discoveries
 # ---------------------------------------------------------------------------
 
-def persist_discoveries(discoveries: list[dict], run: DiscoveryRun) -> tuple[int, int]:
-    """Save discovered skills to DB.  Returns (total, new)."""
+def persist_discoveries(
+    discoveries: list[dict],
+    run: DiscoveryRun,
+    full_metadata: bool = False,
+) -> tuple[int, int]:
+    """Save discovered skills to DB.  Returns (total, new).
+
+    Args:
+        full_metadata: If True, fetch CI/tests/contributors/releases per repo
+                       (5 extra API calls each). Default False for speed.
+    """
     session = get_session()
     total = len(discoveries)
     new_count = 0
+
+    # Cache repo metadata to avoid duplicate fetches
+    # (many skills come from the same repo)
+    _meta_cache: dict[str, dict] = {}
+    _structure_cache: dict[str, dict] = {}
 
     for disc in discoveries:
         slug = disc["slug"]
@@ -326,22 +458,30 @@ def persist_discoveries(discoveries: list[dict], run: DiscoveryRun) -> tuple[int
         ).first()
 
         if existing:
-            # Update source if we found it from a better source
             continue
 
+        repo = disc["repo_fullname"]
+
         # Fetch SKILL.md content
-        skill_md = _gh_get_file(disc["repo_fullname"], disc["skill_path"])
-        readme = _gh_get_file(disc["repo_fullname"], "README.md")
+        skill_md = _gh_get_file(repo, disc["skill_path"])
+        readme = _gh_get_file(repo, "README.md") if repo not in _meta_cache else None
 
         # Extract name from SKILL.md frontmatter or directory name
-        name = _extract_skill_name(skill_md, disc["skill_path"], disc["repo_fullname"])
+        name = _extract_skill_name(skill_md, disc["skill_path"], repo)
 
-        # Fetch repo metadata
-        print(f"  Fetching metadata: {disc['repo_fullname']}", file=sys.stderr)
-        meta = fetch_repo_metadata(disc["repo_fullname"])
+        # Fetch repo metadata (cached per repo)
+        if repo not in _meta_cache:
+            print(f"  Fetching metadata: {repo}", file=sys.stderr)
+            _meta_cache[repo] = fetch_repo_metadata(repo, full=full_metadata)
+        meta = _meta_cache[repo]
 
-        # Analyze structure
-        structure = analyze_skill_structure(disc["repo_fullname"], disc["skill_path"])
+        # Analyze structure (cached per repo)
+        cache_key = f"{repo}:{disc['skill_path']}"
+        if cache_key not in _structure_cache:
+            structure = analyze_skill_structure(repo, disc["skill_path"])
+            _structure_cache[cache_key] = structure
+        else:
+            structure = _structure_cache[cache_key]
 
         skill = Skill(
             name=name,

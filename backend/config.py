@@ -11,19 +11,13 @@ EXPORT_DIR = PROJECT_ROOT / "site" / "public"
 # --- GitHub API ---
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_API = "https://api.github.com"
-GITHUB_SEARCH_QUERIES = [
-    "claude skill SKILL.md in:path",
-    "claude-code skill language:markdown",
-    "topic:claude-code-skill",
-    "topic:claude-skills",
-    "topic:agent-skills",
-    "awesome-claude skills",
-]
 GITHUB_AWESOME_LISTS = [
     "hesreallyhim/awesome-claude-code",
     "ComposioHQ/awesome-claude-skills",
     "sickn33/antigravity-awesome-skills",
     "numman-ali/openskills",
+    "alirezarezvani/claude-skills",
+    "daymade/claude-code-skills",
 ]
 
 # --- LLM ---

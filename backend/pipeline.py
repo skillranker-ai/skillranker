@@ -24,6 +24,8 @@ def main():
     parser.add_argument("--skip-export", action="store_true")
     parser.add_argument("--enrich-limit", type=int, default=0)
     parser.add_argument("--discover-source", choices=["all", "search", "awesome"], default="all")
+    parser.add_argument("--full-metadata", action="store_true",
+                        help="Fetch CI/tests/contributors/releases (5 extra API calls per repo)")
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
@@ -46,7 +48,7 @@ def main():
         if args.discover_source in ("all", "awesome"):
             discoveries.extend(discover_from_awesome(run))
 
-        total, new = persist_discoveries(discoveries, run)
+        total, new = persist_discoveries(discoveries, run, full_metadata=args.full_metadata)
         print(f"  Result: {total} found, {new} new\n", file=sys.stderr)
 
     # 2. Evaluation
