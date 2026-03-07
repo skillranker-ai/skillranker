@@ -280,14 +280,31 @@ def discover_from_search(run: DiscoveryRun) -> list[dict]:
             "source_type": source,
         })
 
-    # --- Strategy 1: filename:SKILL.md (the big gun) ---
-    # Code Search API does NOT support created: qualifier, so no date segmentation.
-    # If results exceed 1000, pagination handles up to that cap.
-    print("  Strategy 1: filename:SKILL.md (full GitHub scan)", file=sys.stderr)
-    results = _search_code_paginated("filename:SKILL.md")
+    # --- Strategy 1: .claude/skills/ directory (standard Claude Code location) ---
+    # This is where Claude Code stores skills. The code search is case-insensitive
+    # so we filter results to only include files named exactly SKILL.md.
+    print("  Strategy 1: .claude/skills/ (standard location)", file=sys.stderr)
+    results = _search_code_paginated("path:.claude/skills filename:SKILL.md")
+    added_s1 = 0
     for r in results:
-        _add(r["repo_fullname"], r["path"])
-    print(f"    -> {len(results)} results", file=sys.stderr)
+        # Filter: must be a file named exactly SKILL.md (not skill.md, not .backup)
+        basename = r["path"].rsplit("/", 1)[-1] if "/" in r["path"] else r["path"]
+        if basename == "SKILL.md":
+            _add(r["repo_fullname"], r["path"])
+            added_s1 += 1
+    print(f"    -> {len(results)} raw, {added_s1} valid SKILL.md files", file=sys.stderr)
+
+    # --- Strategy 1b: Standalone SKILL.md at repo root ---
+    # Some skills are published as standalone repos with SKILL.md at root
+    print("  Strategy 1b: Standalone SKILL.md repos", file=sys.stderr)
+    results = _search_code_paginated("filename:SKILL.md path:/")
+    added_s1b = 0
+    for r in results:
+        basename = r["path"].rsplit("/", 1)[-1] if "/" in r["path"] else r["path"]
+        if basename == "SKILL.md":
+            _add(r["repo_fullname"], r["path"])
+            added_s1b += 1
+    print(f"    -> {len(results)} raw, {added_s1b} valid", file=sys.stderr)
 
     # --- Strategy 2: Topic search ---
     # Find repos tagged with relevant topics (different API, different rate limit)
