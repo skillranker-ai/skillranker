@@ -230,13 +230,10 @@ def _search_code_paginated(query: str, max_pages: int = 10) -> list[dict]:
 
 
 def _generate_date_segments() -> list[str]:
-    """Generate date range segments to bypass 1000 result limit.
+    """Generate date range segments for repository search to bypass 1000 result limit.
 
-    GitHub Code Search returns max 1000 results per query.
-    By segmenting by repo creation date, we can get ALL results.
+    Used by Strategy 3 (repo search) where created: qualifier works.
     """
-    # Cover 2024-01 through current month in monthly segments,
-    # plus one catch-all for older repos
     segments = ["created:<2024-01-01"]
     year = 2024
     month = 1
@@ -284,17 +281,13 @@ def discover_from_search(run: DiscoveryRun) -> list[dict]:
         })
 
     # --- Strategy 1: filename:SKILL.md (the big gun) ---
-    # This finds EVERY SKILL.md on all of GitHub.
-    # Segmented by date to get past the 1000-result cap.
+    # Code Search API does NOT support created: qualifier, so no date segmentation.
+    # If results exceed 1000, pagination handles up to that cap.
     print("  Strategy 1: filename:SKILL.md (full GitHub scan)", file=sys.stderr)
-    segments = _generate_date_segments()
-    for seg in segments:
-        query = f"filename:SKILL.md {seg}"
-        print(f"    Segment: {seg}", file=sys.stderr)
-        results = _search_code_paginated(query)
-        for r in results:
-            _add(r["repo_fullname"], r["path"])
-        print(f"      -> {len(results)} results", file=sys.stderr)
+    results = _search_code_paginated("filename:SKILL.md")
+    for r in results:
+        _add(r["repo_fullname"], r["path"])
+    print(f"    -> {len(results)} results", file=sys.stderr)
 
     # --- Strategy 2: Topic search ---
     # Find repos tagged with relevant topics (different API, different rate limit)
@@ -333,6 +326,7 @@ def discover_from_search(run: DiscoveryRun) -> list[dict]:
         "claude code skill in:description",
         "agent skill claude in:description,readme",
         "SKILL.md claude in:readme",
+        "claude-code skill in:name,description",
     ]
     for dq in desc_queries:
         print(f"    Query: {dq}", file=sys.stderr)
