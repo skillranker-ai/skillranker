@@ -41,7 +41,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           python -m backend.pipeline \
-            --discover-source awesome \
+            --discover-source all \
             --enrich-limit 50 \
             --output site/public/skills.json
 
