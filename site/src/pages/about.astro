@@ -1,0 +1,94 @@
+---
+import Base from '../layouts/Base.astro';
+---
+
+<Base title="About">
+  <div class="about">
+    <h2>About SkillRanker</h2>
+
+    <p>
+      SkillRanker is an AI-powered ranking platform for Claude Code Agent Skills.
+      It automatically discovers, evaluates, and ranks skills from GitHub and other
+      sources to help you find the best tools for your workflow.
+    </p>
+
+    <h3>How it works</h3>
+    <ol>
+      <li><strong>Discovery</strong> &mdash; GitHub API search, awesome-lists, and web scraping find new skills daily</li>
+      <li><strong>Evaluation</strong> &mdash; Hard metrics (maintenance, docs, completeness, adoption, structure) scored deterministically</li>
+      <li><strong>AI Enrichment</strong> &mdash; Claude analyzes each skill for quality, usefulness, novelty, and generates summaries</li>
+      <li><strong>Publishing</strong> &mdash; Rankings exported as JSON, static site built with Astro, deployed via GitHub Pages</li>
+    </ol>
+
+    <h3>Scoring</h3>
+    <table>
+      <thead>
+        <tr><th>Component</th><th>Weight</th><th>What it measures</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Maintenance</td><td>20%</td><td>Commit recency, releases, contributors, issue ratio</td></tr>
+        <tr><td>Documentation</td><td>15%</td><td>SKILL.md quality, README, code examples, structure</td></tr>
+        <tr><td>Completeness</td><td>15%</td><td>References, scripts, examples, templates</td></tr>
+        <tr><td>Adoption</td><td>10%</td><td>Stars, forks, watchers (log-scaled)</td></tr>
+        <tr><td>Structure</td><td>10%</td><td>License, tests, CI/CD, topics, repo age</td></tr>
+        <tr><td>AI Quality</td><td>10%</td><td>Code/doc quality, clarity (AI-assessed)</td></tr>
+        <tr><td>AI Usefulness</td><td>10%</td><td>Practical value for developers (AI-assessed)</td></tr>
+        <tr><td>AI Novelty</td><td>10%</td><td>Uniqueness, not a rehash (AI-assessed)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Open Source</h3>
+    <p>
+      This project is open source.
+      <a href="https://github.com/skillranker-ai/skillranker">View on GitHub</a>
+    </p>
+  </div>
+</Base>
+
+<style>
+  .about {
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  .about h2 {
+    font-size: 2rem;
+    margin-bottom: 1rem;
+  }
+
+  .about h3 {
+    margin-top: 2rem;
+    margin-bottom: 0.5rem;
+    font-size: 1.3rem;
+  }
+
+  .about p, .about li {
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+  }
+
+  .about ol {
+    padding-left: 1.5rem;
+  }
+
+  .about table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+  }
+
+  .about th, .about td {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .about th {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .about td {
+    color: var(--text-muted);
+  }
+</style>

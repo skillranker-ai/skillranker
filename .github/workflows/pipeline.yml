@@ -1,0 +1,94 @@
+name: SkillRanker Pipeline
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+  workflow_dispatch:       # Manual trigger
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'site/**'
+      - '.github/workflows/pipeline.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  # --- Step 1-3: Discovery, Evaluation, Enrichment ---
+  pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python -m backend.pipeline \
+            --discover-source awesome \
+            --enrich-limit 50 \
+            --output site/public/skills.json
+
+      - name: Upload skills.json artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skills-data
+          path: site/public/skills.json
+
+  # --- Step 4: Build & Deploy Astro site ---
+  build-site:
+    needs: pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download skills data
+        uses: actions/download-artifact@v4
+        with:
+          name: skills-data
+          path: site/public/
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm install
+
+      - name: Build site
+        working-directory: site
+        run: npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build-site
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,191 @@
+---
+import Base from '../layouts/Base.astro';
+import SkillCard from '../components/SkillCard.astro';
+
+// Load skills.json at build time
+let catalog: any = { domains: [], top_overall: [], total_skills: 0, generated_at: '' };
+try {
+  const data = await import('../../public/skills.json');
+  catalog = data.default || data;
+} catch {
+  // skills.json not yet generated — show empty state
+}
+
+const domains = catalog.domains || [];
+const topOverall = catalog.top_overall || [];
+---
+
+<Base title="Best Claude Code Skills">
+  <div class="hero">
+    <h2>Best Claude Code Skills</h2>
+    <p>AI-ranked catalog of {catalog.total_skills} agent skills across {domains.length} domains</p>
+    {catalog.generated_at && (
+      <p class="updated">Last updated: {new Date(catalog.generated_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+    )}
+  </div>
+
+  {domains.length === 0 && (
+    <div class="empty-state">
+      <p>No skills data yet. Run the pipeline to generate rankings:</p>
+      <pre><code>python -m backend.pipeline</code></pre>
+    </div>
+  )}
+
+  <!-- Domain navigation -->
+  {domains.length > 0 && (
+    <nav class="domain-nav">
+      <a href="#top-overall" class="domain-link">Top Overall</a>
+      {domains.map((d: any) => (
+        <a href={`#${d.domain}`} class="domain-link">
+          {d.domain}
+          <span class="count">{d.total}</span>
+        </a>
+      ))}
+    </nav>
+  )}
+
+  <!-- Top Overall -->
+  {topOverall.length > 0 && (
+    <section id="top-overall">
+      <h2 class="section-title">Top Overall</h2>
+      {topOverall.slice(0, 10).map((skill: any, i: number) => (
+        <SkillCard
+          rank={i + 1}
+          name={skill.name}
+          slug={skill.slug}
+          repo_url={skill.repo_url}
+          stars={skill.stars}
+          score_final={skill.score_final}
+          domains={skill.domains}
+          tags={skill.tags}
+          ai_summary={skill.ai_summary}
+          ai_strengths={skill.ai_strengths}
+          ai_weaknesses={skill.ai_weaknesses}
+          license={skill.license}
+          latest_release={skill.latest_release}
+          has_skill_md={skill.has_skill_md}
+          has_references={skill.has_references}
+          has_scripts={skill.has_scripts}
+          has_examples={skill.has_examples}
+        />
+      ))}
+    </section>
+  )}
+
+  <!-- Per-domain sections -->
+  {domains.map((domain: any) => (
+    <section id={domain.domain}>
+      <h2 class="section-title">
+        {domain.domain}
+        <span class="section-count">{domain.total} skills</span>
+      </h2>
+      {domain.skills.slice(0, 10).map((skill: any, i: number) => (
+        <SkillCard
+          rank={i + 1}
+          name={skill.name}
+          slug={skill.slug}
+          repo_url={skill.repo_url}
+          stars={skill.stars}
+          score_final={skill.score_final}
+          domains={skill.domains}
+          tags={skill.tags}
+          ai_summary={skill.ai_summary}
+          ai_strengths={skill.ai_strengths}
+          ai_weaknesses={skill.ai_weaknesses}
+          license={skill.license}
+          latest_release={skill.latest_release}
+          has_skill_md={skill.has_skill_md}
+          has_references={skill.has_references}
+          has_scripts={skill.has_scripts}
+          has_examples={skill.has_examples}
+        />
+      ))}
+    </section>
+  ))}
+</Base>
+
+<style>
+  .hero {
+    text-align: center;
+    padding: 2rem 0 1.5rem;
+  }
+
+  .hero h2 {
+    font-size: 2.2rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .hero p {
+    color: var(--text-muted);
+  }
+
+  .updated {
+    font-size: 0.8rem;
+    margin-top: 0.3rem;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 3rem;
+    color: var(--text-muted);
+  }
+
+  .empty-state pre {
+    background: var(--bg-card);
+    padding: 1rem;
+    border-radius: 8px;
+    display: inline-block;
+    margin-top: 1rem;
+  }
+
+  .domain-nav {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    padding: 1rem 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2rem;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 10;
+  }
+
+  .domain-link {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    padding: 0.4rem 0.8rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    transition: all 0.15s;
+  }
+
+  .domain-link:hover {
+    border-color: var(--accent);
+    color: var(--text);
+    text-decoration: none;
+  }
+
+  .count {
+    background: rgba(255, 255, 255, 0.06);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    margin-left: 0.3rem;
+  }
+
+  .section-title {
+    font-size: 1.5rem;
+    margin: 2rem 0 1rem;
+    padding-top: 1rem;
+    text-transform: capitalize;
+  }
+
+  .section-count {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    font-weight: 400;
+    margin-left: 0.5rem;
+  }
+</style>
