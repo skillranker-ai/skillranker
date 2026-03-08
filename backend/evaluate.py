@@ -213,6 +213,8 @@ def compute_final_score(skill: Skill) -> float:
         + skill.score_ai_quality * w["ai_quality"]
         + skill.score_ai_usefulness * w["ai_usefulness"]
         + skill.score_ai_novelty * w["ai_novelty"]
+        + skill.score_ai_description * w["ai_description"]
+        + skill.score_ai_reusability * w["ai_reusability"]
     )
 
 

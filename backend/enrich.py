@@ -1,6 +1,9 @@
 """
-AI enrichment layer — uses Claude to generate summaries, categories,
-strengths/weaknesses, and soft quality scores.
+AI enrichment layer — uses Claude to evaluate skills via contract system.
+
+The contract defines EXACTLY what JSON structure LLM must return.
+Python validates the response before saving anything to DB.
+LLM never writes to DB directly.
 
 Usage:
     python -m backend.enrich
@@ -17,43 +20,113 @@ from datetime import datetime, timezone
 from sqlmodel import select
 
 from backend.config import ANTHROPIC_API_KEY, DOMAINS, LLM_MAX_TOKENS, LLM_MODEL
+from backend.contracts import ENRICHMENT_CONTRACT, render_contract, validate_contract
 from backend.db import get_session, init_db
 from backend.models import Skill, SkillStatus
 
 
-ENRICHMENT_PROMPT = """\
-You are an expert evaluator of Claude Code Agent Skills.
+# ---------------------------------------------------------------------------
+# Prompt assembly — contract-driven
+# ---------------------------------------------------------------------------
 
-Analyze this skill and return a JSON object with exactly these fields:
+SYSTEM_PROMPT = """\
+You are an expert evaluator of Claude Code Agent Skills — SKILL.md files that \
+teach Claude Code how to perform specific tasks.
 
-{{
-  "domains": ["<primary domain>", "<optional secondary>"],
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-  "summary": "<2-3 sentence summary of what this skill does and when to use it>",
-  "strengths": ["strength 1", "strength 2", "strength 3"],
-  "weaknesses": ["weakness 1", "weakness 2"],
-  "use_cases": ["use case 1", "use case 2", "use case 3"],
-  "score_quality": <0-100 integer: code/doc quality, clarity, structure>,
-  "score_usefulness": <0-100 integer: practical value for developers>,
-  "score_novelty": <0-100 integer: uniqueness, not a copy/rehash>
-}}
+You will receive a skill to evaluate and a contract defining the exact JSON \
+structure you must return. Follow the contract precisely."""
 
-Valid domains (pick 1-2): {domains}
+SCORING_CRITERIA = """\
+## Scoring criteria (0-100 each, be critical and honest)
 
-SKILL NAME: {name}
-REPO: {repo}
-STARS: {stars}
-LICENSE: {license}
+**score_quality** — Instruction clarity & coherence
+- Are the instructions clear, well-structured, and unambiguous?
+- Would Claude Code execute them correctly without confusion?
+- Penalty: vague instructions, contradictions, poor formatting
 
-SKILL.md content (first 3000 chars):
-{skill_md}
+**score_usefulness** — Practical value for real-world work
+- Does this solve an actual problem developers face?
+- Is it a toy/demo or production-ready?
+- Penalty: trivial tasks, too narrow, already built-in to Claude
 
-README (first 1000 chars):
-{readme}
+**score_novelty** — Uniqueness and originality
+- Is this a fresh idea or a copy/rehash of common patterns?
+- Penalty: generic boilerplate, copy-paste from docs, bulk-generated
 
-Return ONLY the JSON object, no markdown fences, no explanation.
-"""
+**score_description** — SKILL.md documentation quality
+- Does it explain WHAT, WHEN, and HOW?
+- Are there examples, edge cases, limitations?
+- Penalty: missing description, no examples, wall-of-text
 
+**score_reusability** — Portability across projects
+- Can this skill be dropped into any project and work?
+- Penalty: hardcoded paths, assumes specific project structure"""
+
+DOMAIN_INSTRUCTION = """\
+## Category assignment
+
+Pick 1-3 domains that BEST fit. Be precise — "coding" and "general" are last resorts.
+
+Suggested domains: {domains}
+
+If NONE fits well, create a new one in lowercase-kebab-case (e.g. "bioinformatics")."""
+
+
+def _build_prompt(skill: Skill) -> str:
+    """Assemble the full prompt from contract + skill data."""
+    parts = [
+        SCORING_CRITERIA,
+        "",
+        DOMAIN_INSTRUCTION.format(domains=", ".join(DOMAINS)),
+        "",
+        render_contract("skill-enrichment", ENRICHMENT_CONTRACT),
+        "",
+        "## Skill to evaluate",
+        "",
+        f"NAME: {skill.name}",
+        f"REPO: {skill.repo_fullname}",
+        f"STARS: {skill.stars}",
+        f"LICENSE: {skill.license}",
+        "",
+        "SKILL.md content (first 4000 chars):",
+        skill.skill_md_raw[:4000],
+        "",
+        "README (first 1500 chars):",
+        skill.readme_raw[:1500],
+    ]
+
+    # Add previous assessment context if re-evaluating
+    previous = _build_previous_assessment(skill)
+    if previous:
+        parts.append(previous)
+
+    return "\n".join(parts)
+
+
+def _build_previous_assessment(skill: Skill) -> str:
+    """Build context of previous assessment for re-evaluation."""
+    if not skill.enriched_at or not skill.ai_summary:
+        return ""
+
+    return f"""
+## Previous assessment (from {skill.enriched_at})
+
+Compare the current SKILL.md with your previous assessment below.
+If content changed, adjust scores accordingly with justification.
+If unchanged, keep scores consistent (+/- 3 points max).
+
+Previous scores: quality={skill.score_ai_quality:.0f}, \
+usefulness={skill.score_ai_usefulness:.0f}, novelty={skill.score_ai_novelty:.0f}, \
+description={skill.score_ai_description:.0f}, reusability={skill.score_ai_reusability:.0f}
+Previous summary: {skill.ai_summary}
+Previous domains: {', '.join(skill.domains)}
+Previous strengths: {'; '.join(skill.ai_strengths)}
+Previous weaknesses: {'; '.join(skill.ai_weaknesses)}"""
+
+
+# ---------------------------------------------------------------------------
+# Claude API call
+# ---------------------------------------------------------------------------
 
 def _call_claude(prompt: str) -> dict | None:
     """Call Claude API and parse JSON response."""
@@ -72,14 +145,16 @@ def _call_claude(prompt: str) -> dict | None:
         response = client.messages.create(
             model=LLM_MODEL,
             max_tokens=LLM_MAX_TOKENS,
+            system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text.strip()
-        # Handle potential markdown fences
+        # Strip markdown fences if present
         if text.startswith("```"):
             text = text.split("\n", 1)[1]
             if text.endswith("```"):
                 text = text[:-3]
+            text = text.strip()
         return json.loads(text)
     except json.JSONDecodeError as e:
         print(f"  JSON parse error: {e}", file=sys.stderr)
@@ -89,37 +164,55 @@ def _call_claude(prompt: str) -> dict | None:
         return None
 
 
-def enrich_skill(skill: Skill) -> bool:
-    """Enrich a single skill with AI-generated content. Returns True on success."""
-    prompt = ENRICHMENT_PROMPT.format(
-        domains=", ".join(DOMAINS),
-        name=skill.name,
-        repo=skill.repo_fullname,
-        stars=skill.stars,
-        license=skill.license,
-        skill_md=skill.skill_md_raw[:3000],
-        readme=skill.readme_raw[:1000],
-    )
+# ---------------------------------------------------------------------------
+# Enrich single skill (contract-validated)
+# ---------------------------------------------------------------------------
 
+def enrich_skill(skill: Skill) -> bool:
+    """Enrich a single skill. Returns True on success.
+
+    Flow: build prompt from contract → call Claude → validate response
+    against contract → only then save fields to skill object.
+    """
+    prompt = _build_prompt(skill)
     result = _call_claude(prompt)
     if not result:
         return False
 
-    skill.domains = result.get("domains", ["general"])
-    skill.tags = result.get("tags", [])
-    skill.ai_summary = result.get("summary", "")
-    skill.ai_strengths = result.get("strengths", [])
-    skill.ai_weaknesses = result.get("weaknesses", [])
-    skill.ai_use_cases = result.get("use_cases", [])
-    skill.score_ai_quality = float(result.get("score_quality", 0))
-    skill.score_ai_usefulness = float(result.get("score_usefulness", 0))
-    skill.score_ai_novelty = float(result.get("score_novelty", 0))
+    # Validate LLM response against contract BEFORE saving anything
+    errors = validate_contract(ENRICHMENT_CONTRACT, result)
+    if errors:
+        print(f"  Contract validation failed for {skill.name}:", file=sys.stderr)
+        for e in errors[:5]:
+            print(f"    - {e}", file=sys.stderr)
+        return False
+
+    # Contract passed — Python saves validated data to model
+    skill.domains = result["domains"]
+    skill.tags = result["tags"]
+    skill.ai_summary = result["summary"]
+    skill.ai_strengths = result["strengths"]
+    skill.ai_weaknesses = result["weaknesses"]
+    skill.ai_use_cases = result["use_cases"]
+    skill.score_ai_quality = float(result["score_quality"])
+    skill.score_ai_usefulness = float(result["score_usefulness"])
+    skill.score_ai_novelty = float(result["score_novelty"])
+    skill.score_ai_description = float(result["score_description"])
+    skill.score_ai_reusability = float(result["score_reusability"])
 
     return True
 
 
+# ---------------------------------------------------------------------------
+# Batch enrichment
+# ---------------------------------------------------------------------------
+
 def enrich_all(limit: int = 0) -> int:
-    """Enrich evaluated skills. Returns count enriched."""
+    """Enrich evaluated skills. Returns count enriched.
+
+    Smart skip: if skill_md_changed=False and already enriched,
+    reuse previous AI scores (no API call).
+    """
     session = get_session()
     query = select(Skill).where(Skill.status == SkillStatus.EVALUATED.value)
     if limit > 0:
@@ -127,26 +220,39 @@ def enrich_all(limit: int = 0) -> int:
     skills = session.exec(query).all()
 
     count = 0
+    skipped = 0
+    failed = 0
     for skill in skills:
+        # Skip API call if SKILL.md hasn't changed and we already have AI scores
+        if not skill.skill_md_changed and skill.enriched_at and skill.ai_summary:
+            skill.status = SkillStatus.ENRICHED.value
+            from backend.evaluate import compute_final_score
+            skill.score_final = compute_final_score(skill)
+            session.add(skill)
+            skipped += 1
+            continue
+
         print(f"  Enriching: {skill.name} ({skill.repo_fullname})", file=sys.stderr)
         success = enrich_skill(skill)
 
         if success:
             skill.status = SkillStatus.ENRICHED.value
             skill.enriched_at = datetime.now(timezone.utc).isoformat()
+            skill.skill_md_changed = False
 
-            # Recompute final score with AI scores
             from backend.evaluate import compute_final_score
             skill.score_final = compute_final_score(skill)
-
             count += 1
         else:
-            # Still update status to avoid re-processing on next run
-            # but keep as evaluated — can retry later
-            pass
+            failed += 1
 
         session.add(skill)
 
+        # Commit in batches
+        if (count + failed) % 10 == 0:
+            session.commit()
+
+    print(f"  Done: {count} enriched, {skipped} skipped (unchanged), {failed} failed", file=sys.stderr)
     session.commit()
     session.close()
     return count

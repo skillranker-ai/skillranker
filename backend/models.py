@@ -93,6 +93,8 @@ class Skill(SQLModel, table=True):
     score_ai_quality: float = SQLField(default=0.0)
     score_ai_usefulness: float = SQLField(default=0.0)
     score_ai_novelty: float = SQLField(default=0.0)
+    score_ai_description: float = SQLField(default=0.0)
+    score_ai_reusability: float = SQLField(default=0.0)
 
     # Final composite score
     score_final: float = SQLField(default=0.0, index=True)
@@ -104,6 +106,9 @@ class Skill(SQLModel, table=True):
     ai_strengths: list[str] = SQLField(default=[], sa_column=Column(JSON))
     ai_weaknesses: list[str] = SQLField(default=[], sa_column=Column(JSON))
     ai_use_cases: list[str] = SQLField(default=[], sa_column=Column(JSON))
+
+    # Change tracking
+    skill_md_changed: bool = SQLField(default=True)  # True = needs AI re-enrichment
 
     # Metadata
     discovered_at: str = SQLField(
@@ -154,6 +159,8 @@ class SkillCard(BaseModel):
     score_ai_quality: float
     score_ai_usefulness: float
     score_ai_novelty: float
+    score_ai_description: float
+    score_ai_reusability: float
     ai_summary: str
     ai_strengths: list[str]
     ai_weaknesses: list[str]

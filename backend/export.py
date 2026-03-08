@@ -42,6 +42,8 @@ def skill_to_card(skill: Skill) -> SkillCard:
         score_ai_quality=round(skill.score_ai_quality, 1),
         score_ai_usefulness=round(skill.score_ai_usefulness, 1),
         score_ai_novelty=round(skill.score_ai_novelty, 1),
+        score_ai_description=round(skill.score_ai_description, 1),
+        score_ai_reusability=round(skill.score_ai_reusability, 1),
         ai_summary=skill.ai_summary,
         ai_strengths=skill.ai_strengths,
         ai_weaknesses=skill.ai_weaknesses,
@@ -73,9 +75,17 @@ def build_catalog() -> SiteCatalog:
     cards = [skill_to_card(s) for s in skills]
     now = datetime.now(timezone.utc).isoformat()
 
+    # Collect ALL domains actually used (from DB, not hardcoded list)
+    all_domains: set[str] = set()
+    for c in cards:
+        all_domains.update(c.domains)
+    # Add predefined domains so they appear even if empty
+    all_domains.update(DOMAINS)
+    all_domains.discard("")
+
     # Build domain rankings
     domain_rankings = []
-    for domain in DOMAINS:
+    for domain in sorted(all_domains):
         domain_cards = [c for c in cards if domain in c.domains]
         domain_cards.sort(key=lambda c: -c.score_final)
         if domain_cards:
@@ -86,7 +96,7 @@ def build_catalog() -> SiteCatalog:
                 updated_at=now,
             ))
 
-    # Skills without a matched domain go to "general"
+    # Skills without any domain go to "general"
     assigned = {c.slug for dr in domain_rankings for c in dr.skills}
     unassigned = [c for c in cards if c.slug not in assigned]
     if unassigned:

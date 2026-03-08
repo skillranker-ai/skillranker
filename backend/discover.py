@@ -649,13 +649,19 @@ def refresh_existing_skills() -> tuple[int, int]:
             skill.topics = meta.get("topics", [])
             skill.license = meta.get("license", "")
 
-            # Re-fetch SKILL.md content
+            # Re-fetch SKILL.md and check if content actually changed
             new_content = _gh_get_file(repo, skill.skill_path)
             if new_content:
+                old_content = skill.skill_md_raw
                 skill.skill_md_raw = new_content
                 skill.skill_md_lines = len(new_content.split("\n"))
+                skill.skill_md_changed = (new_content != old_content)
+                if skill.skill_md_changed:
+                    print(f"    SKILL.md changed: {skill.name}", file=sys.stderr)
+            else:
+                skill.skill_md_changed = False
 
-            # Reset to NEW so it gets re-evaluated
+            # Reset to NEW so it gets re-evaluated (hard metrics always refresh)
             if skill.status != SkillStatus.NEW.value:
                 skill.status = SkillStatus.NEW.value
 

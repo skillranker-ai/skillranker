@@ -23,7 +23,7 @@ GITHUB_AWESOME_LISTS = [
 # --- LLM ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 LLM_MODEL = "claude-sonnet-4-20250514"
-LLM_MAX_TOKENS = 2048
+LLM_MAX_TOKENS = 4096
 
 # --- Database ---
 DATABASE_URL = os.environ.get(
@@ -40,26 +40,57 @@ SCORE_WEIGHTS = {
     "adoption": 0.10,
     "structure": 0.10,
     # Soft metrics from AI (30%)
-    "ai_quality": 0.10,
-    "ai_usefulness": 0.10,
-    "ai_novelty": 0.10,
+    "ai_quality": 0.06,       # code/instruction clarity and coherence
+    "ai_usefulness": 0.08,    # practical value for real-world work
+    "ai_novelty": 0.06,       # uniqueness, not a copy/rehash
+    "ai_description": 0.05,   # quality of SKILL.md description itself
+    "ai_reusability": 0.05,   # how portable/reusable across projects
 }
 
 # --- Categories ---
+# Suggested domains — Claude can also create new ones during enrichment.
+# After enrichment, export.py collects all actual domains from DB.
 DOMAINS = [
+    # Development
     "coding",
     "code-review",
     "debugging",
+    "testing",
     "architecture",
+    "frontend",
+    "backend",
+    # Operations
+    "devops",
+    "cloud-infrastructure",
+    "automation",
+    # Security
     "security",
-    "data-ml",
+    "pentesting",
+    # Data & AI
+    "data-science",
+    "machine-learning",
+    "scientific-computing",
+    # Content & Communication
     "documentation",
-    "research",
+    "technical-writing",
+    "marketing-seo",
+    "communication",
+    # Business & Management
+    "project-management",
+    "product-management",
+    "business-strategy",
+    # Agent & AI tooling
     "prompt-engineering",
     "agent-orchestration",
-    "devops",
-    "testing",
+    "mcp-integration",
+    # Research & Learning
+    "research",
+    "education",
+    # Creative
     "creative",
+    "design",
+    # Other
     "office-productivity",
+    "finance",
     "general",
 ]
