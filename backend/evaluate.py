@@ -13,7 +13,7 @@ import math
 import sys
 from datetime import datetime, timezone
 
-from sqlmodel import select
+from sqlmodel import select, func
 
 from backend.config import SCORE_WEIGHTS
 from backend.db import get_session, init_db
@@ -144,24 +144,43 @@ def score_completeness(skill: Skill) -> float:
     return min(s, 100)
 
 
-def score_adoption(skill: Skill) -> float:
-    """Score based on community adoption signals."""
+def score_adoption(skill: Skill, session=None) -> float:
+    """Score based on community adoption signals.
+
+    Stars/forks are diluted by sqrt(skills_in_repo) so repos with many
+    skills don't dominate.  A solo-skill repo gets full credit; a repo
+    with 100 skills dilutes by 10x.
+    """
+    # Count how many skills share the same repo
+    skills_in_repo = 1
+    if session and skill.repo_fullname:
+        count = session.exec(
+            select(func.count(Skill.id)).where(
+                Skill.repo_fullname == skill.repo_fullname
+            )
+        ).one()
+        skills_in_repo = max(count, 1)
+
+    dilution = math.sqrt(skills_in_repo)
+
     s = 0.0
 
-    # Stars (0-50) — log-scaled
-    if skill.stars > 0:
-        star_score = math.log10(skill.stars) / 5.0 * 50  # 100k stars = 50
-        s += min(star_score, 50)
+    # Stars (0-50) — log-scaled, diluted
+    effective_stars = skill.stars / dilution
+    if effective_stars > 0:
+        star_score = math.log10(effective_stars) / 5.0 * 50  # 100k = 50
+        s += min(max(star_score, 0), 50)
 
-    # Forks (0-30) — log-scaled
-    if skill.forks > 0:
-        fork_score = math.log10(skill.forks) / 4.0 * 30  # 10k forks = 30
-        s += min(fork_score, 30)
+    # Forks (0-30) — log-scaled, diluted
+    effective_forks = skill.forks / dilution
+    if effective_forks > 0:
+        fork_score = math.log10(effective_forks) / 4.0 * 30  # 10k = 30
+        s += min(max(fork_score, 0), 30)
 
-    # Watchers (0-20)
+    # Watchers (0-20) — not diluted (watchers = genuine repo interest)
     if skill.watchers > 0:
         watch_score = math.log10(skill.watchers) / 4.0 * 20
-        s += min(watch_score, 20)
+        s += min(max(watch_score, 0), 20)
 
     return min(s, 100)
 
@@ -218,6 +237,15 @@ def compute_final_score(skill: Skill) -> float:
     )
 
 
+def should_reject(skill: Skill) -> bool:
+    """Quality gate — reject skills that are too short/empty to be useful."""
+    if skill.skill_md_lines < 10:
+        return True
+    if len(skill.skill_md_raw.strip()) < 200:
+        return True
+    return False
+
+
 def evaluate_all() -> int:
     """Evaluate all skills that need scoring.  Returns count evaluated."""
     session = get_session()
@@ -228,11 +256,20 @@ def evaluate_all() -> int:
     ).all()
 
     count = 0
+    rejected = 0
     for skill in skills:
+        # Quality gate — reject trivial skills before expensive enrichment
+        if skill.status == SkillStatus.NEW.value and should_reject(skill):
+            skill.status = SkillStatus.REJECTED.value
+            skill.evaluated_at = datetime.now(timezone.utc).isoformat()
+            session.add(skill)
+            rejected += 1
+            continue
+
         skill.score_maintenance = score_maintenance(skill)
         skill.score_documentation = score_documentation(skill)
         skill.score_completeness = score_completeness(skill)
-        skill.score_adoption = score_adoption(skill)
+        skill.score_adoption = score_adoption(skill, session=session)
         skill.score_structure = score_structure(skill)
         skill.score_final = compute_final_score(skill)
 
@@ -243,6 +280,8 @@ def evaluate_all() -> int:
         session.add(skill)
         count += 1
 
+    if rejected:
+        print(f"  Rejected {rejected} skills (below quality threshold)", file=sys.stderr)
     session.commit()
     session.close()
     return count

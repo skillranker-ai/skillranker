@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import re
 import sys
@@ -35,6 +36,21 @@ from backend.config import (
 )
 from backend.db import get_session, init_db
 from backend.models import DiscoveryRun, Skill, SkillStatus, SourceType
+
+
+# ---------------------------------------------------------------------------
+# Content hashing
+# ---------------------------------------------------------------------------
+
+def compute_content_hash(content: str) -> str:
+    """SHA256 hash of content (first 16 hex chars). Deterministic."""
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+def compute_near_hash(content: str) -> str:
+    """Hash of normalized first 500 chars — detects near-duplicates."""
+    normalized = re.sub(r"\s+", " ", content[:500].lower().strip())
+    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +559,7 @@ def persist_discoveries(
         else:
             structure = _structure_cache[cache_key]
 
+        raw_content = skill_md or ""
         skill = Skill(
             name=name,
             slug=slug,
@@ -551,10 +568,12 @@ def persist_discoveries(
             skill_path=disc["skill_path"],
             source_type=disc["source_type"],
             status=SkillStatus.NEW.value,
-            skill_md_raw=skill_md or "",
+            skill_md_raw=raw_content,
             readme_raw=readme or "",
-            skill_md_lines=len((skill_md or "").split("\n")),
+            skill_md_lines=len(raw_content.split("\n")),
             has_skill_md=bool(skill_md),
+            content_hash=compute_content_hash(raw_content) if raw_content else "",
+            near_hash=compute_near_hash(raw_content) if raw_content else "",
             # GitHub metrics
             stars=meta.get("stars", 0),
             forks=meta.get("forks", 0),
@@ -649,13 +668,15 @@ def refresh_existing_skills() -> tuple[int, int]:
             skill.topics = meta.get("topics", [])
             skill.license = meta.get("license", "")
 
-            # Re-fetch SKILL.md and check if content actually changed
+            # Re-fetch SKILL.md and check if content actually changed (via hash)
             new_content = _gh_get_file(repo, skill.skill_path)
             if new_content:
-                old_content = skill.skill_md_raw
+                new_hash = compute_content_hash(new_content)
+                skill.skill_md_changed = (new_hash != skill.content_hash)
                 skill.skill_md_raw = new_content
                 skill.skill_md_lines = len(new_content.split("\n"))
-                skill.skill_md_changed = (new_content != old_content)
+                skill.content_hash = new_hash
+                skill.near_hash = compute_near_hash(new_content)
                 if skill.skill_md_changed:
                     print(f"    SKILL.md changed: {skill.name}", file=sys.stderr)
             else:

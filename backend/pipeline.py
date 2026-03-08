@@ -80,6 +80,16 @@ def main():
         count = evaluate_all()
         print(f"  Result: {count} evaluated\n", file=sys.stderr)
 
+    # 2b. Deduplication
+    if not args.skip_evaluate:
+        print("=" * 60, file=sys.stderr)
+        print("STEP 2b: Deduplication", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        from backend.dedup import dedup_skills
+
+        rejected = dedup_skills()
+        print(f"  Result: {rejected} duplicates rejected\n", file=sys.stderr)
+
     # 3. Enrichment
     if not args.skip_enrich:
         print("=" * 60, file=sys.stderr)

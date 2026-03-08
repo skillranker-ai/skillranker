@@ -109,6 +109,9 @@ class Skill(SQLModel, table=True):
 
     # Change tracking
     skill_md_changed: bool = SQLField(default=True)  # True = needs AI re-enrichment
+    content_hash: str = SQLField(default="")  # SHA256 of skill_md_raw (first 16 hex chars)
+    enriched_content_hash: str = SQLField(default="")  # content_hash when last enriched
+    near_hash: str = SQLField(default="", index=True)  # normalized hash for near-dedup
 
     # Metadata
     discovered_at: str = SQLField(

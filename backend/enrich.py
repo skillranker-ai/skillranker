@@ -223,8 +223,9 @@ def enrich_all(limit: int = 0) -> int:
     skipped = 0
     failed = 0
     for skill in skills:
-        # Skip API call if SKILL.md hasn't changed and we already have AI scores
-        if not skill.skill_md_changed and skill.enriched_at and skill.ai_summary:
+        # Skip API call if content hash unchanged since last enrichment
+        if (skill.content_hash and skill.content_hash == skill.enriched_content_hash
+                and skill.enriched_at and skill.ai_summary):
             skill.status = SkillStatus.ENRICHED.value
             from backend.evaluate import compute_final_score
             skill.score_final = compute_final_score(skill)
@@ -239,6 +240,7 @@ def enrich_all(limit: int = 0) -> int:
             skill.status = SkillStatus.ENRICHED.value
             skill.enriched_at = datetime.now(timezone.utc).isoformat()
             skill.skill_md_changed = False
+            skill.enriched_content_hash = skill.content_hash
 
             from backend.evaluate import compute_final_score
             skill.score_final = compute_final_score(skill)
