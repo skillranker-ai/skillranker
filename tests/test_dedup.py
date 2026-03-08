@@ -1,5 +1,7 @@
 """Tests for backend.dedup — deduplication logic."""
 
+from sqlmodel import select
+
 from backend.dedup import dedup_skills
 from backend.models import Skill, SkillStatus
 from tests.conftest import make_skill
@@ -8,9 +10,22 @@ from tests.conftest import make_skill
 import backend.dedup as dedup_module
 
 
+def _get_status(session, slug: str) -> str:
+    """Re-query skill status after dedup (which closes its own session)."""
+    skill = session.exec(select(Skill).where(Skill.slug == slug)).first()
+    return skill.status
+
+
+def _patch_session(session, monkeypatch):
+    """Patch get_session to return test session, prevent close from detaching."""
+    original_close = session.close
+    monkeypatch.setattr(session, "close", lambda: None)  # prevent close
+    monkeypatch.setattr(dedup_module, "get_session", lambda: session)
+
+
 def test_exact_duplicate_detected(session, monkeypatch):
     """Skills with identical near_hash should be deduplicated."""
-    monkeypatch.setattr(dedup_module, "get_session", lambda: session)
+    _patch_session(session, monkeypatch)
 
     skill1 = make_skill(
         slug="owner-repo--skill-a",
@@ -36,15 +51,13 @@ def test_exact_duplicate_detected(session, monkeypatch):
     rejected = dedup_skills()
     assert rejected == 1
 
-    session.refresh(skill1)
-    session.refresh(skill2)
-    assert skill1.status == SkillStatus.EVALUATED.value  # keeper (higher score)
-    assert skill2.status == SkillStatus.REJECTED.value  # duplicate
+    assert _get_status(session, "owner-repo--skill-a") == SkillStatus.EVALUATED.value
+    assert _get_status(session, "other-repo--skill-b") == SkillStatus.REJECTED.value
 
 
 def test_unique_skills_kept(session, monkeypatch):
     """Skills with different near_hash should all survive."""
-    monkeypatch.setattr(dedup_module, "get_session", lambda: session)
+    _patch_session(session, monkeypatch)
 
     skill1 = make_skill(slug="a", near_hash="hash1", status=SkillStatus.EVALUATED.value)
     skill2 = make_skill(slug="b", near_hash="hash2", status=SkillStatus.EVALUATED.value)
@@ -58,9 +71,8 @@ def test_unique_skills_kept(session, monkeypatch):
 
 def test_best_score_wins(session, monkeypatch):
     """The highest-scored duplicate should be kept."""
-    monkeypatch.setattr(dedup_module, "get_session", lambda: session)
+    _patch_session(session, monkeypatch)
 
-    skills = []
     for i, score in enumerate([30.0, 90.0, 60.0]):
         s = make_skill(
             slug=f"repo--skill-{i}",
@@ -69,25 +81,21 @@ def test_best_score_wins(session, monkeypatch):
             status=SkillStatus.EVALUATED.value,
             score_final=score,
         )
-        skills.append(s)
         session.add(s)
     session.commit()
 
     rejected = dedup_skills()
     assert rejected == 2
 
-    for s in skills:
-        session.refresh(s)
-
-    # skill with score 90.0 should survive
-    assert skills[1].status == SkillStatus.EVALUATED.value
-    assert skills[0].status == SkillStatus.REJECTED.value
-    assert skills[2].status == SkillStatus.REJECTED.value
+    # skill-1 (score 90.0) should survive
+    assert _get_status(session, "repo--skill-1") == SkillStatus.EVALUATED.value
+    assert _get_status(session, "repo--skill-0") == SkillStatus.REJECTED.value
+    assert _get_status(session, "repo--skill-2") == SkillStatus.REJECTED.value
 
 
 def test_already_rejected_not_counted(session, monkeypatch):
     """Already-rejected skills should not participate in dedup."""
-    monkeypatch.setattr(dedup_module, "get_session", lambda: session)
+    _patch_session(session, monkeypatch)
 
     skill1 = make_skill(
         slug="a", near_hash="dup", status=SkillStatus.EVALUATED.value, score_final=50.0
