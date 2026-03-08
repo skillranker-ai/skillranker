@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--discover-limit", type=int, default=0,
                         help="Max skills to persist per run (0=unlimited)")
     parser.add_argument("--discover-source", choices=["all", "search", "awesome"], default="all")
+    parser.add_argument("--skip-refresh", action="store_true",
+                        help="Skip refreshing existing skills (sha-based change detection)")
     parser.add_argument("--full-metadata", action="store_true",
                         help="Fetch CI/tests/contributors/releases (5 extra API calls per repo)")
     parser.add_argument("--output", type=str, default=None)
@@ -57,6 +59,16 @@ def main():
             limit=args.discover_limit,
         )
         print(f"  Result: {total} found, {new} new\n", file=sys.stderr)
+
+    # 1b. Refresh existing skills (sha-based change detection)
+    if not args.skip_refresh and not args.skip_discover:
+        print("=" * 60, file=sys.stderr)
+        print("STEP 1b: Refresh existing skills", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        from backend.discover import refresh_existing_skills
+
+        checked, updated = refresh_existing_skills()
+        print(f"  Result: {checked} repos checked, {updated} skills refreshed\n", file=sys.stderr)
 
     # 2. Evaluation
     if not args.skip_evaluate:

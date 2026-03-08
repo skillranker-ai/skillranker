@@ -131,12 +131,18 @@ def fetch_repo_metadata(repo_fullname: str, full: bool = False) -> dict:
         "topics": data.get("topics", []),
         "created_at_gh": data.get("created_at", ""),
         "last_commit": data.get("pushed_at", ""),
+        "last_commit_sha": "",
         "has_ci": False,
         "has_tests": False,
         "contributors": 1,
         "release_count": 0,
         "latest_release": "",
     }
+
+    # Fetch HEAD sha (1 extra call, but essential for change detection)
+    ref_data = _gh_get(f"{GITHUB_API}/repos/{repo_fullname}/git/ref/heads/{data.get('default_branch', 'main')}")
+    if ref_data and "object" in ref_data:
+        result["last_commit_sha"] = ref_data["object"].get("sha", "")
 
     if not full:
         return result
@@ -556,6 +562,7 @@ def persist_discoveries(
             open_issues=meta.get("open_issues", 0),
             contributors=meta.get("contributors", 0),
             last_commit=meta.get("last_commit"),
+            last_commit_sha=meta.get("last_commit_sha", ""),
             created_at_gh=meta.get("created_at_gh"),
             license=meta.get("license", ""),
             topics=meta.get("topics", []),
@@ -587,6 +594,81 @@ def persist_discoveries(
     session.close()
 
     return total, new_count
+
+
+def refresh_existing_skills() -> tuple[int, int]:
+    """Re-check existing skills for repo changes using HEAD sha.
+
+    Compares stored last_commit_sha with current HEAD. If different,
+    refreshes metadata and resets status to NEW for re-evaluation.
+
+    Returns (checked, updated).
+    """
+    session = get_session()
+    skills = session.exec(select(Skill)).all()
+
+    # Group skills by repo to avoid duplicate API calls
+    repo_skills: dict[str, list[Skill]] = {}
+    for skill in skills:
+        repo_skills.setdefault(skill.repo_fullname, []).append(skill)
+
+    checked = 0
+    updated = 0
+
+    for repo, repo_skill_list in repo_skills.items():
+        checked += 1
+
+        # Get current repo info
+        data = _gh_get(f"{GITHUB_API}/repos/{repo}")
+        if not data:
+            continue
+
+        default_branch = data.get("default_branch", "main")
+        ref_data = _gh_get(f"{GITHUB_API}/repos/{repo}/git/ref/heads/{default_branch}")
+        if not ref_data or "object" not in ref_data:
+            continue
+
+        current_sha = ref_data["object"].get("sha", "")
+        stored_sha = repo_skill_list[0].last_commit_sha or ""
+
+        if current_sha and current_sha == stored_sha:
+            continue  # No changes — skip
+
+        # Repo changed — refresh metadata for all skills in this repo
+        print(f"  Repo changed: {repo} (old={stored_sha[:8]}.. new={current_sha[:8]}..)", file=sys.stderr)
+        meta = fetch_repo_metadata(repo)
+        meta["last_commit_sha"] = current_sha
+
+        for skill in repo_skill_list:
+            skill.stars = meta.get("stars", 0)
+            skill.forks = meta.get("forks", 0)
+            skill.watchers = meta.get("watchers", 0)
+            skill.open_issues = meta.get("open_issues", 0)
+            skill.last_commit = meta.get("last_commit")
+            skill.last_commit_sha = current_sha
+            skill.topics = meta.get("topics", [])
+            skill.license = meta.get("license", "")
+
+            # Re-fetch SKILL.md content
+            new_content = _gh_get_file(repo, skill.skill_path)
+            if new_content:
+                skill.skill_md_raw = new_content
+                skill.skill_md_lines = len(new_content.split("\n"))
+
+            # Reset to NEW so it gets re-evaluated
+            if skill.status != SkillStatus.NEW.value:
+                skill.status = SkillStatus.NEW.value
+
+            session.add(skill)
+            updated += 1
+
+        if checked % 10 == 0:
+            session.commit()
+
+    session.commit()
+    session.close()
+    print(f"  Refresh: {checked} repos checked, {updated} skills updated", file=sys.stderr)
+    return checked, updated
 
 
 def _is_claude_skill(skill_md: str, skill_path: str) -> bool:

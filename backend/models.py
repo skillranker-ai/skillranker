@@ -65,6 +65,7 @@ class Skill(SQLModel, table=True):
     open_issues: int = SQLField(default=0)
     contributors: int = SQLField(default=0)
     last_commit: Optional[str] = SQLField(default=None)
+    last_commit_sha: Optional[str] = SQLField(default=None)  # HEAD sha — skip re-eval if unchanged
     created_at_gh: Optional[str] = SQLField(default=None)
     license: str = SQLField(default="")
     topics: list[str] = SQLField(default=[], sa_column=Column(JSON))

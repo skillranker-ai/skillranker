@@ -1,6 +1,7 @@
 # Core
 sqlmodel>=0.0.22
 pydantic>=2.0
+psycopg2-binary>=2.9
 
 # AI enrichment (optional — pipeline works without it)
 anthropic>=0.40.0
